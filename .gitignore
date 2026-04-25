@@ -117,3 +117,9 @@ storybook-static/
 .stylelintcache
 tmp/
 temp/
+
+# ── DB backups (v1.2.1 prep) ────────────────────────────────
+backup_pre_*
+
+# ── Patch artifacts (temporary, not code) ───────────────────
+techkb-patch-*.zip
