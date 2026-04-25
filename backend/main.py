@@ -18,7 +18,7 @@ load_dotenv()  # must run before any os.environ[...] below
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from authlib.integrations.starlette_client import OAuth, OAuthError
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from jose import JWTError, jwt
@@ -36,6 +36,10 @@ ALGORITHM      = "HS256"
 TOKEN_EXPIRE   = 60 * 24 * 7                         # minutes → 7 days
 FRONTEND_URL   = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 HEALTH_CHECK_INTERVAL_HOURS = int(os.environ.get("HEALTH_CHECK_HOURS", "6"))
+ENVIRONMENT    = os.environ.get("ENVIRONMENT", "development")
+
+COOKIE_NAME    = "kb_session"
+COOKIE_SECURE  = ENVIRONMENT == "production"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kb-platform")
@@ -68,12 +72,33 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
-async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> dict:
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+def set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=TOKEN_EXPIRE * 60,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
 
-    payload = decode_token(auth_header.split(" ", 1)[1])
+
+def clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(key=COOKIE_NAME, path="/")
+
+
+async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> dict:
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    payload = decode_token(token)
     user_id = payload.get("sub")
 
     result = await db.execute(
@@ -186,7 +211,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY,
+    same_site="lax",
+    https_only=COOKIE_SECURE,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONTEND_URL],
@@ -290,10 +320,18 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
     user = result.mappings().first()
 
     access_token = create_access_token({"sub": str(user["id"]), "email": user["email"]})
-    return RedirectResponse(
-        url=f"{FRONTEND_URL}/auth/callback?token={access_token}",
-        status_code=302,
-    )
+
+    response = RedirectResponse(url=f"{FRONTEND_URL}/", status_code=302)
+    set_auth_cookie(response, access_token)
+    return response
+
+
+@app.post("/api/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout():
+    """Clears the kb_session cookie. Idempotent — no auth required."""
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    clear_auth_cookie(response)
+    return response
 
 
 @app.get("/api/auth/me", response_model=UserOut)
