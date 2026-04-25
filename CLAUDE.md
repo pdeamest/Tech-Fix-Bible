@@ -45,3 +45,18 @@ con hreflang, i18n estricto.
 - Esperar OK explícito del usuario antes de hacer commit o push.
 - Si una migración SQL aborta con RAISE EXCEPTION, NO hacer workaround: 
 reportar al usuario con la query de inspección que dice el error.
+
+## Plan v1.2.1 — orden estricto
+
+PASO 1 ✓ — Migraciones 005 y 006 al repo (NO aplicadas).
+PASO 2 — backend/main.py: hotfixes (cookies, endpoints nuevos, is_admin)
+         + adaptar /api/academy a la FK certifications.
+         + cablear admin router (include_router).
+         Reparar admin.py: run_link_health_check() sin arg, is_admin en SELECT.
+PASO 3 — seed_runner.py + seed_data.py: re-mapear certification string a
+         certification_id UUID via lookup en la tabla certifications.
+PASO 4 — Correr migraciones 005 y 006 contra DB local.
+PASO 5 — Smoke test: uvicorn + curl /api/academy + /api/manufacturers
+         + /api/certifications + /api/health.
+PASO 6 — Frontend: AuthContext, Header, KBSearch, academy page,
+         sitemap, robots, layouts, i18n, lib/api.ts.
