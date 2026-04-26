@@ -267,6 +267,13 @@ class VoteIn(BaseModel):
     vote: Literal["like", "dislike"]
 
 
+class VoteOut(BaseModel):
+    kb_id: UUID4
+    vote: Optional[Literal["like", "dislike"]] = None   # None when the vote was removed
+    resolution_score: Optional[float] = None
+    total_votes: int = 0
+
+
 class AcademyResourceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -507,7 +514,22 @@ async def get_kb_article(kb_id: UUID4, db: AsyncSession = Depends(get_db)):
 # ─────────────────────────────────────────────
 #  Routes · Voting (protected)
 # ─────────────────────────────────────────────
-@app.post("/api/kb/vote", status_code=status.HTTP_201_CREATED)
+async def _resolution_for(db: AsyncSession, kb_id: str) -> tuple[Optional[float], int]:
+    """Reads the current resolution_score / total_votes for a KB article."""
+    result = await db.execute(
+        text(
+            "SELECT resolution_score, total_votes "
+            "FROM kb_resolution_scores WHERE kb_id = :id"
+        ),
+        {"id": kb_id},
+    )
+    row = result.mappings().first()
+    if not row:
+        return (None, 0)
+    return (row["resolution_score"], row["total_votes"])
+
+
+@app.post("/api/kb/vote", response_model=VoteOut, status_code=status.HTTP_201_CREATED)
 async def cast_vote(
     payload: VoteIn,
     current_user: dict = Depends(get_current_user),
@@ -518,24 +540,49 @@ async def cast_vote(
         text("""
             INSERT INTO interactions (kb_id, user_id, vote)
             VALUES (:kb_id, :user_id, :vote)
-            ON CONFLICT (user_id, kb_id) DO UPDATE SET vote = EXCLUDED.vote
+            ON CONFLICT (user_id, kb_id) DO UPDATE
+                SET vote = EXCLUDED.vote
         """),
-        {"kb_id": str(payload.kb_id), "user_id": current_user["id"], "vote": payload.vote},
+        {
+            "kb_id":   str(payload.kb_id),
+            "user_id": str(current_user["id"]),
+            "vote":    payload.vote,
+        },
     )
     await db.commit()
 
-    # Return updated resolution score
-    result = await db.execute(
-        text("SELECT resolution_score, total_votes FROM kb_resolution_scores WHERE kb_id = :id"),
-        {"id": str(payload.kb_id)},
+    score, total = await _resolution_for(db, str(payload.kb_id))
+    return VoteOut(
+        kb_id=payload.kb_id,
+        vote=payload.vote,
+        resolution_score=score,
+        total_votes=total,
     )
-    row = result.mappings().first()
-    return {
-        "kb_id": str(payload.kb_id),
-        "vote": payload.vote,
-        "resolution_score": row["resolution_score"] if row else None,
-        "total_votes": row["total_votes"] if row else 0,
-    }
+
+
+@app.delete("/api/kb/vote/{kb_id}", response_model=VoteOut)
+async def remove_vote(
+    kb_id: UUID4,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retira el voto del usuario (undo). El trigger de karma (migración 005)
+    reversa la contribución al karma_score automáticamente.
+    """
+    await db.execute(
+        text("DELETE FROM interactions WHERE kb_id = :kb AND user_id = :u"),
+        {"kb": str(kb_id), "u": str(current_user["id"])},
+    )
+    await db.commit()
+
+    score, total = await _resolution_for(db, str(kb_id))
+    return VoteOut(
+        kb_id=kb_id,
+        vote=None,
+        resolution_score=score,
+        total_votes=total,
+    )
 
 
 # ─────────────────────────────────────────────
