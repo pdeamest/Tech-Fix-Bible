@@ -32,8 +32,9 @@ Resumen del patch v1.2:
 - Backend P0 hotfixes: scheduler no comparte AsyncSession entre ticks, 
 karma trigger maneja INSERT/UPDATE/DELETE, health-check usa la columna 
 correcta por tabla, JWT en cookie HttpOnly.
-- DB: enum cert_name → tabla certifications con 18 certs seeded (PCNSA, 
-PCNSE, NSE4, NSE7 incluidos).
+- DB: enum cert_name → tabla certifications con 19 certs seeded (PCNSA, 
+PCNSE, NSE4, NSE7 incluidos; GCP_ACE incluido en cloud además de AWS_SA y 
+AZ_104).
 - Frontend: cookie auth, dynamic catalogs, JSON-LD inline, sitemap+robots 
 con hreflang, i18n estricto.
 
