@@ -38,6 +38,15 @@ FRONTEND_URL   = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 HEALTH_CHECK_INTERVAL_HOURS = int(os.environ.get("HEALTH_CHECK_HOURS", "6"))
 ENVIRONMENT    = os.environ.get("ENVIRONMENT", "development")
 
+# Bootstrap admins by email (CSV). Matched users get is_admin=TRUE on every
+# Google login. Revocation must be done in DB (UPDATE users SET is_admin=FALSE);
+# removing an email from this var alone does NOT demote — by design.
+ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ADMIN_EMAILS", "").split(",")
+    if e.strip()
+}
+
 COOKIE_NAME    = "kb_session"
 COOKIE_SECURE  = ENVIRONMENT == "production"
 
@@ -391,6 +400,25 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
     )
     await db.commit()
     user = result.mappings().first()
+
+    # Bootstrap admin promotion (idempotent). DB-only revocation, see ADMIN_EMAILS.
+    if email.lower() in ADMIN_EMAILS:
+        await db.execute(
+            text("UPDATE users SET is_admin = TRUE WHERE google_sub = :sub"),
+            {"sub": google_sub},
+        )
+        await db.commit()
+        # Re-fetch so any downstream consumer of `user` sees the post-promotion state.
+        # The JWT itself only carries sub+email, but get_current_user reads is_admin
+        # fresh from DB on every request, so the next /api/auth/me reflects this.
+        result = await db.execute(
+            text(
+                "SELECT id, email, display_name, karma_score, is_admin "
+                "FROM users WHERE google_sub = :sub"
+            ),
+            {"sub": google_sub},
+        )
+        user = result.mappings().first()
 
     access_token = create_access_token({"sub": str(user["id"]), "email": user["email"]})
 
