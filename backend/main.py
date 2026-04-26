@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from jose import JWTError, jwt
-from pydantic import UUID4, BaseModel, ConfigDict
+from pydantic import UUID4, BaseModel, ConfigDict, HttpUrl
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.middleware.sessions import SessionMiddleware
@@ -271,11 +271,14 @@ class AcademyResourceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID4
-    certification: str
+    certification_code: str
+    certification_name: str
+    certification_icon: Optional[str] = None
+    vendor_slug: Optional[str] = None
     level: str
     title: str
     description: str
-    resource_url: str
+    resource_url: HttpUrl
     status: str
     tags: list[str]
     is_free: bool
@@ -540,43 +543,51 @@ async def cast_vote(
 # ─────────────────────────────────────────────
 @app.get("/api/academy", response_model=list[AcademyResourceOut])
 async def list_academy(
-    certification: Optional[str] = Query(default=None),
+    certification: Optional[str] = Query(
+        default=None, description="Certification code (e.g. CCNA, PCNSA)"
+    ),
     level: Optional[str] = Query(default=None),
     is_free: Optional[bool] = Query(default=None),
     q: str = Query(default=""),
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ):
+    """
+    Academy resource catalog joined with certifications.
+    Requires migration 006 to be applied — returns 500 otherwise
+    (column academy_resources.certification_id does not exist).
+    """
     sql = """
-        SELECT
-            id,
-            certification::TEXT AS certification,
-            level::TEXT         AS level,
-            title,
-            description,
-            resource_url,
-            status::TEXT        AS status,
-            tags,
-            is_free
-        FROM academy_resources
+        SELECT ar.id,
+               c.code          AS certification_code,
+               c.display_name  AS certification_name,
+               c.icon          AS certification_icon,
+               c.vendor_slug   AS vendor_slug,
+               ar.level, ar.title, ar.description,
+               ar.resource_url, ar.status, ar.tags, ar.is_free
+        FROM   academy_resources ar
+        JOIN   certifications    c ON c.id = ar.certification_id
         WHERE
-            (:q = '' OR similarity(title, :q) > 0.15)
-            AND (:cert IS NULL OR certification::TEXT = :cert)
-            AND (:level IS NULL OR level::TEXT = :level)
-            AND (:free IS NULL OR is_free = :free)
+            (:q = '' OR similarity(ar.title, :q) > 0.15)
+            AND (:cert  IS NULL OR c.code         = :cert)
+            AND (:level IS NULL OR ar.level::TEXT = :level)
+            AND (:free  IS NULL OR ar.is_free     = :free)
+            AND c.is_active = TRUE
         ORDER BY
-            CASE level::TEXT
+            c.display_order,
+            CASE ar.level
                 WHEN 'beginner'     THEN 1
                 WHEN 'associate'    THEN 2
                 WHEN 'professional' THEN 3
                 WHEN 'expert'       THEN 4
             END,
-            certification::TEXT
+            ar.title
         LIMIT :limit
     """
     result = await db.execute(
         text(sql),
-        {"q": q, "cert": certification, "level": level, "free": is_free, "limit": limit},
+        {"q": q, "cert": certification, "level": level,
+         "free": is_free, "limit": limit},
     )
     return [dict(r) for r in result.mappings().all()]
 
