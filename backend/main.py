@@ -102,7 +102,7 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
     user_id = payload.get("sub")
 
     result = await db.execute(
-        text("SELECT id, email, display_name, karma_score FROM users WHERE id = :id AND is_active = TRUE"),
+        text("SELECT id, email, display_name, karma_score, is_admin FROM users WHERE id = :id AND is_active = TRUE"),
         {"id": user_id},
     )
     user = result.mappings().first()
@@ -225,6 +225,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Admin router. Imported here (not at the top) because admin.py does
+# `from main import ...` — by this point engine, AsyncSessionLocal,
+# get_db, get_current_user and run_link_health_check are all bound.
+import admin  # noqa: E402
+
+app.include_router(admin.router)
+
 
 # ─────────────────────────────────────────────
 #  Pydantic Schemas  (Pydantic v2, lenient URL handling)
@@ -296,6 +303,7 @@ class UserOut(BaseModel):
     email: str
     display_name: str
     karma_score: int
+    is_admin: bool = False
 
 
 # ─────────────────────────────────────────────
@@ -639,13 +647,3 @@ async def list_academy(
     return [dict(r) for r in result.mappings().all()]
 
 
-# ─────────────────────────────────────────────
-#  Routes · Admin: Manual Link Health Check
-# ─────────────────────────────────────────────
-@app.post("/api/admin/health-check")
-async def manual_health_check(
-    current_user: dict = Depends(get_current_user),
-):
-    """Trigger a manual link health check (admin only, extend with role check)."""
-    asyncio.create_task(run_link_health_check())
-    return {"message": "Health check started in background"}
