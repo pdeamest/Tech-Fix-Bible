@@ -229,6 +229,23 @@ app.add_middleware(
 # ─────────────────────────────────────────────
 #  Pydantic Schemas  (Pydantic v2, lenient URL handling)
 # ─────────────────────────────────────────────
+class ManufacturerOut(BaseModel):
+    id: UUID4
+    slug: str
+    display_name: str
+    website_url: str
+    logo_url: Optional[str] = None
+
+
+class CertificationOut(BaseModel):
+    id: UUID4
+    code: str
+    display_name: str
+    vendor_slug: Optional[str] = None
+    icon: Optional[str] = None
+    website_url: Optional[str] = None
+
+
 class KBArticleOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -277,6 +294,44 @@ class UserOut(BaseModel):
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+# ─────────────────────────────────────────────
+#  Routes · Catalog endpoints (dynamic dropdowns)
+# ─────────────────────────────────────────────
+@app.get("/api/manufacturers", response_model=list[ManufacturerOut])
+async def list_manufacturers(db: AsyncSession = Depends(get_db)):
+    """Vendor catalog. Consumed by KB filters and the create-article form."""
+    result = await db.execute(
+        text("""
+            SELECT id, slug, display_name, website_url, logo_url
+            FROM manufacturers
+            ORDER BY display_name
+        """)
+    )
+    return [dict(r) for r in result.mappings().all()]
+
+
+@app.get("/api/certifications", response_model=list[CertificationOut])
+async def list_certifications(
+    vendor: Optional[str] = Query(default=None, description="Filter by vendor slug"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Certification catalog. Replaces the cert_name enum.
+    Requires migration 006 to be applied — returns 500 otherwise.
+    """
+    result = await db.execute(
+        text("""
+            SELECT id, code, display_name, vendor_slug, icon, website_url
+            FROM certifications
+            WHERE is_active = TRUE
+              AND (:vendor IS NULL OR vendor_slug = :vendor)
+            ORDER BY display_order, code
+        """),
+        {"vendor": vendor},
+    )
+    return [dict(r) for r in result.mappings().all()]
 
 
 # ─────────────────────────────────────────────
