@@ -176,12 +176,9 @@ async def run_link_health_check() -> None:
 
             for row, link_status in zip(rows, statuses):
                 new_status = link_status if isinstance(link_status, str) else "broken"
+                extra = ", last_health_check = NOW()" if table == "knowledge_base" else ""
                 await db.execute(
-                    text(
-                        f"UPDATE {table} "  # noqa: S608
-                        f"SET status = :s, last_health_check = NOW() "
-                        f"WHERE id = :id"
-                    ),
+                    text(f"UPDATE {table} SET status = :s{extra} WHERE id = :id"),  # noqa: S608
                     {"s": new_status, "id": str(row.id)},
                 )
 
@@ -353,7 +350,7 @@ async def list_certifications(
             SELECT id, code, display_name, vendor_slug, icon, website_url
             FROM certifications
             WHERE is_active = TRUE
-              AND (:vendor IS NULL OR vendor_slug = :vendor)
+              AND (CAST(:vendor AS TEXT) IS NULL OR vendor_slug = :vendor)
             ORDER BY display_order, code
         """),
         {"vendor": vendor},
@@ -488,8 +485,8 @@ async def search_kb(
                 similarity(kb.description, :q) > 0.10 OR
                 kb.fts_vector @@ plainto_tsquery('english', :q)
             )
-            AND (:manufacturer IS NULL OR m.slug = :manufacturer)
-            AND (:status_f IS NULL OR kb.status::TEXT = :status_f)
+            AND (CAST(:manufacturer AS TEXT) IS NULL OR m.slug = :manufacturer)
+            AND (CAST(:status_f AS TEXT) IS NULL OR kb.status::TEXT = :status_f)
             AND (:tags_empty OR kb.tags @> :tag_arr::TEXT[])
         ORDER BY sim_score DESC, kb.created_at DESC
         LIMIT :limit OFFSET :offset
@@ -652,9 +649,9 @@ async def list_academy(
         JOIN   certifications    c ON c.id = ar.certification_id
         WHERE
             (:q = '' OR similarity(ar.title, :q) > 0.15)
-            AND (:cert  IS NULL OR c.code         = :cert)
-            AND (:level IS NULL OR ar.level::TEXT = :level)
-            AND (:free  IS NULL OR ar.is_free     = :free)
+            AND (CAST(:cert AS TEXT) IS NULL OR c.code         = :cert)
+            AND (CAST(:level AS TEXT) IS NULL OR ar.level::TEXT = :level)
+            AND (CAST(:free AS BOOLEAN) IS NULL OR ar.is_free     = :free)
             AND c.is_active = TRUE
         ORDER BY
             c.display_order,
