@@ -1,0 +1,50 @@
+{
+  "meta": {
+    "siteTitle": "TechKB – Base de Conocimiento Técnica",
+    "siteDescription": "Hub centralizado de documentación técnica: VMware, Cisco, Palo Alto, Fortinet y más."
+  },
+  "nav": {
+    "home": "Inicio",
+    "search": "Buscar",
+    "academy": "Academia",
+    "login": "Iniciar sesión con Google",
+    "logout": "Cerrar sesión"
+  },
+  "auth": {
+    "loginRequired": "Inicia sesión para votar",
+    "loggedInAs": "Sesión iniciada como"
+  },
+  "kb": {
+    "searchPlaceholder": "Buscar en la base de conocimiento… (ej. vSphere HA, OSPF, BGP)",
+    "searchLabel": "Buscar artículos técnicos",
+    "allManufacturers": "Todos los fabricantes",
+    "allStatuses": "Todos los estados",
+    "online": "En línea",
+    "broken": "Enlace roto",
+    "unchecked": "Sin verificar",
+    "noResults": "No se encontraron artículos. Intenta con otras palabras.",
+    "votes": "votos",
+    "like": "Útil",
+    "dislike": "No fue útil",
+    "resolutionScore": "Puntuación de resolución",
+    "viewOfficialDocs": "Ver documentación oficial",
+    "loginToVote": "Inicia sesión para votar"
+  },
+  "academy": {
+    "title": "Academia de Certificaciones",
+    "subtitle": "Recursos de estudio para VCP, CCNA, PCNSA, NSE4, CISSP y más",
+    "filterLevel": "Nivel",
+    "filterCert": "Certificación",
+    "free": "Gratis",
+    "paid": "De pago",
+    "freeOnly": "Solo gratis",
+    "allCerts": "Todas las certificaciones",
+    "allLevels": "Todos los niveles",
+    "beginner": "Principiante",
+    "associate": "Asociado",
+    "professional": "Profesional",
+    "expert": "Experto",
+    "resources": "recursos",
+    "noResults": "Ningún recurso coincide con los filtros."
+  }
+}
