@@ -470,7 +470,7 @@ async def search_kb(
             rs.resolution_score,
             rs.total_votes,
             CASE
-                WHEN :q = '' THEN 1.0
+                WHEN CAST(:q AS TEXT) = '' THEN 1.0
                 ELSE GREATEST(
                     similarity(kb.title,       :q),
                     similarity(kb.description, :q)
@@ -487,7 +487,7 @@ async def search_kb(
             )
             AND (CAST(:manufacturer AS TEXT) IS NULL OR m.slug = :manufacturer)
             AND (CAST(:status_f AS TEXT) IS NULL OR kb.status::TEXT = :status_f)
-            AND (:tags_empty OR kb.tags @> :tag_arr::TEXT[])
+            AND (CAST(:tags_empty AS BOOLEAN) OR kb.tags @> :tag_arr::TEXT[])
         ORDER BY sim_score DESC, kb.created_at DESC
         LIMIT :limit OFFSET :offset
     """
