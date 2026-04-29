@@ -472,22 +472,22 @@ async def search_kb(
             CASE
                 WHEN CAST(:q AS TEXT) = '' THEN 1.0
                 ELSE GREATEST(
-                    similarity(kb.title,       :q),
-                    similarity(kb.description, :q)
+                    similarity(kb.title,       CAST(:q AS TEXT)),
+                    similarity(kb.description, CAST(:q AS TEXT))
                 )
             END AS sim_score
         FROM knowledge_base kb
         JOIN manufacturers m   ON m.id = kb.manufacturer_id
         LEFT JOIN kb_resolution_scores rs ON rs.kb_id = kb.id
         WHERE
-            (:q = '' OR
-                similarity(kb.title, :q) > 0.15 OR
-                similarity(kb.description, :q) > 0.10 OR
-                kb.fts_vector @@ plainto_tsquery('english', :q)
+            (CAST(:q AS TEXT) = '' OR
+                similarity(kb.title, CAST(:q AS TEXT)) > 0.15 OR
+                similarity(kb.description, CAST(:q AS TEXT)) > 0.10 OR
+                kb.fts_vector @@ plainto_tsquery('english', CAST(:q AS TEXT))
             )
             AND (CAST(:manufacturer AS TEXT) IS NULL OR m.slug = :manufacturer)
             AND (CAST(:status_f AS TEXT) IS NULL OR kb.status::TEXT = :status_f)
-            AND (CAST(:tags_empty AS BOOLEAN) OR kb.tags @> :tag_arr::TEXT[])
+            AND (CAST(:tags_empty AS BOOLEAN) OR kb.tags @> CAST(:tag_arr AS TEXT[]))
         ORDER BY sim_score DESC, kb.created_at DESC
         LIMIT :limit OFFSET :offset
     """
