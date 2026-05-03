@@ -31,6 +31,11 @@ from starlette.middleware.sessions import SessionMiddleware
 #  Configuration
 # ─────────────────────────────────────────────
 DATABASE_URL   = os.environ["DATABASE_URL"]          # postgresql+asyncpg://user:pass@host/db
+# Railway/Heroku give us postgresql://; sqlalchemy + asyncpg needs postgresql+asyncpg://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 SECRET_KEY     = os.environ["SECRET_KEY"]            # openssl rand -hex 32
 ALGORITHM      = "HS256"
 TOKEN_EXPIRE   = 60 * 24 * 7                         # minutes → 7 days
