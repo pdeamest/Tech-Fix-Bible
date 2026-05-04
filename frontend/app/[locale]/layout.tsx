@@ -4,7 +4,7 @@
 import type { ReactNode } from "react";
 import { notFound } from "next/navigation";
 import { NextIntlClientProvider } from "next-intl";
-import { getMessages } from "next-intl/server";
+import { getMessages, unstable_setRequestLocale } from "next-intl/server";
 import { AuthProvider } from "@/contexts/AuthContext";
 import Header from "@/components/Header";
 
@@ -26,6 +26,9 @@ export default async function LocaleLayout({
   if (!LOCALES.includes(locale as (typeof LOCALES)[number])) {
     notFound();
   }
+
+  // Enable static rendering for this locale
+  unstable_setRequestLocale(locale);
 
   const messages = await getMessages();
 

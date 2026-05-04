@@ -1,3 +1,0 @@
-export default function Page() {
-  return <h1>Tech-Fix-Bible: Sistema Operativo</h1>
-}
