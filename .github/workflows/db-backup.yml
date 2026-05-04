@@ -1,12 +1,8 @@
-# .github/workflows/db-backup.yml
-# Daily Postgres 18 backup using the official postgres:18 Docker image.
-# Server is Postgres 18.3, client must be >= server version.
-
 name: db-backup
 
 on:
   schedule:
-    - cron: '0 3 * * *'   # 03:00 UTC daily
+    - cron: '0 3 * * *'
   workflow_dispatch:
 
 permissions:
@@ -31,16 +27,16 @@ jobs:
           DUMPFILE: ${{ steps.ts.outputs.dumpfile }}
         run: |
           set -euo pipefail
-          
+
           if [ -z "${DATABASE_PUBLIC_URL:-}" ]; then
-            echo "❌ DATABASE_PUBLIC_URL secret not set in repo settings"
+            echo "DATABASE_PUBLIC_URL secret not set in repo settings"
             exit 1
           fi
-          
-          echo "→ Pulling postgres:18 image..."
+
+          echo "Pulling postgres:18 image..."
           docker pull postgres:18 > /dev/null
-          
-          echo "→ Generating dump via pg_dump 18 inside container..."
+
+          echo "Generating dump via pg_dump 18 inside container..."
           docker run --rm \
             -v "${PWD}:/backup" \
             -e PGURL="$DATABASE_PUBLIC_URL" \
@@ -50,20 +46,16 @@ jobs:
               --no-owner \
               --no-privileges \
               --file="/backup/${DUMPFILE}"
-          
-          echo "✓ Dump generated:"
+
+          echo "Dump generated:"
           ls -lh "${DUMPFILE}"
 
       - name: Upload as GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: backup-${{ steps.ts.outputs.timestamp }}
-          name: "DB Backup ${{ steps.ts.outputs.timestamp }}"
-          body: |
-            Automated daily Postgres 18 backup from Railway.
-            
-            **Restore:**
-pg_restore --no-owner --no-privileges -d $TARGET_DB techkb-*.dump
-files: ${{ steps.ts.outputs.dumpfile }}
+          name: DB Backup ${{ steps.ts.outputs.timestamp }}
+          body: Automated daily Postgres 18 backup from Railway.
+          files: ${{ steps.ts.outputs.dumpfile }}
           make_latest: false
           prerelease: true
