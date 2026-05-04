@@ -123,3 +123,6 @@ backup_pre_*
 
 # ── Patch artifacts (temporary, not code) ───────────────────
 techkb-patch-*.zip
+
+# Local DB backups (do not commit)
+backups/
