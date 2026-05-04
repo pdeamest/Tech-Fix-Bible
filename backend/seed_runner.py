@@ -21,7 +21,7 @@ from typing import Any, TypedDict
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from seed_data import ARTICLES, ACADEMY, MANUFACTURERS, EXTRA_CERT_ENUM_VALUES
+from seed_data import ARTICLES, ACADEMY, MANUFACTURERS
 
 log = logging.getLogger("kb-platform.seed")
 
@@ -90,12 +90,9 @@ def _fmt(v: Any) -> str:
 #  Schema preconditions
 # ─────────────────────────────────────────────────────────────
 async def ensure_schema_preconditions(engine) -> None:
-    async with engine.begin() as conn:
-        for value in EXTRA_CERT_ENUM_VALUES:
-            await conn.execute(
-                text(f"ALTER TYPE cert_name ADD VALUE IF NOT EXISTS '{value}'")
-            )
-
+    # Migration 006 dropped the cert_name enum and replaced
+    # academy_resources.certification with certification_id (FK). The seed
+    # runner no longer ALTERs an enum nor references the old column.
     ddl = """
     DO $$
     BEGIN
@@ -105,7 +102,7 @@ async def ensure_schema_preconditions(engine) -> None:
         END IF;
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_academy_cert_title') THEN
             ALTER TABLE academy_resources
-                ADD CONSTRAINT uq_academy_cert_title UNIQUE (certification, title);
+                ADD CONSTRAINT uq_academy_cert_title UNIQUE (certification_id, title);
         END IF;
     END $$;
     """
@@ -233,11 +230,11 @@ async def _seed_articles(
 # ─────────────────────────────────────────────────────────────
 ACADEMY_UPSERT = text("""
     INSERT INTO academy_resources
-        (certification, level, title, description, resource_url, is_free, tags, status)
+        (certification_id, level, title, description, resource_url, is_free, tags, status)
     VALUES
-        (:cert::cert_name, :level::cert_level, :title, :description,
+        (:cert_id, :level::cert_level, :title, :description,
          :resource_url, :is_free, :tags, 'unchecked')
-    ON CONFLICT (certification, title) DO UPDATE SET
+    ON CONFLICT (certification_id, title) DO UPDATE SET
         level        = EXCLUDED.level,
         description  = EXCLUDED.description,
         resource_url = EXCLUDED.resource_url,
@@ -247,7 +244,38 @@ ACADEMY_UPSERT = text("""
 """)
 
 
-async def _seed_academy(session: AsyncSession, cap: LogCapture, dry_run: bool) -> tuple[int, int]:
+async def _load_cert_map(session: AsyncSession, cap: LogCapture) -> dict[str, str]:
+    """Build {code: uuid} from the certifications table (seeded by migration 006)."""
+    result = await session.execute(text("SELECT code, id FROM certifications"))
+    cert_map = {row.code: str(row.id) for row in result.fetchall()}
+
+    required = {r["certification"] for r in ACADEMY}
+    missing = required - set(cert_map.keys())
+    if missing:
+        cap.error(
+            "seed.precondition.fail",
+            "Certification codes referenced by seed data are not in the certifications table",
+            missing=sorted(missing),
+        )
+        raise RuntimeError(
+            f"Certification codes not found in certifications table: {sorted(missing)}. "
+            f"Add them to migration 006 or remove from seed_data.ACADEMY."
+        )
+
+    cap.info(
+        "seed.certifications.loaded",
+        f"{len(cert_map)} certifications in map",
+        count=len(cert_map),
+    )
+    return cert_map
+
+
+async def _seed_academy(
+    session: AsyncSession,
+    cert_map: dict[str, str],
+    cap: LogCapture,
+    dry_run: bool,
+) -> tuple[int, int]:
     inserted = updated = 0
     for r in ACADEMY:
         if dry_run:
@@ -255,7 +283,7 @@ async def _seed_academy(session: AsyncSession, cap: LogCapture, dry_run: bool) -
             continue
 
         result = await session.execute(ACADEMY_UPSERT, {
-            "cert":         r["certification"],
+            "cert_id":      cert_map[r["certification"]],
             "level":        r["level"],
             "title":        r["title"],
             "description":  r["description"],
@@ -300,9 +328,10 @@ async def run_seed(
              inserted=mfr_ins, updated=mfr_upd)
 
     mfr_map = await _load_manufacturer_map(session, cap)
+    cert_map = await _load_cert_map(session, cap)
 
     kb_ins, kb_upd = await _seed_articles(session, mfr_map, cap, dry_run)
-    ac_ins, ac_upd = await _seed_academy(session, cap, dry_run)
+    ac_ins, ac_upd = await _seed_academy(session, cert_map, cap, dry_run)
 
     if not dry_run:
         await session.commit()

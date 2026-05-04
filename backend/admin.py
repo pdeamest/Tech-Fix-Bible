@@ -31,7 +31,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # Import shared pieces from main.py — NOT duplicated
 from main import (
-    AsyncSessionLocal,
     engine,
     get_current_user,
     get_db,
@@ -218,11 +217,10 @@ async def trigger_health_check(
     )
 
     async def _job() -> None:
-        async with AsyncSessionLocal() as session:
-            try:
-                await run_link_health_check(session)
-            except Exception:
-                log.exception("admin.healthcheck.failed")
+        try:
+            await run_link_health_check()
+        except Exception:
+            log.exception("admin.healthcheck.failed")
 
     asyncio.create_task(_job())
     return {"message": "Health check started in background"}

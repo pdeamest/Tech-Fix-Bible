@@ -18,11 +18,11 @@ load_dotenv()  # must run before any os.environ[...] below
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from authlib.integrations.starlette_client import OAuth, OAuthError
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from jose import JWTError, jwt
-from pydantic import UUID4, BaseModel, ConfigDict
+from pydantic import UUID4, BaseModel, ConfigDict, HttpUrl
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.middleware.sessions import SessionMiddleware
@@ -31,11 +31,29 @@ from starlette.middleware.sessions import SessionMiddleware
 #  Configuration
 # ─────────────────────────────────────────────
 DATABASE_URL   = os.environ["DATABASE_URL"]          # postgresql+asyncpg://user:pass@host/db
+# Railway/Heroku give us postgresql://; sqlalchemy + asyncpg needs postgresql+asyncpg://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 SECRET_KEY     = os.environ["SECRET_KEY"]            # openssl rand -hex 32
 ALGORITHM      = "HS256"
 TOKEN_EXPIRE   = 60 * 24 * 7                         # minutes → 7 days
 FRONTEND_URL   = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 HEALTH_CHECK_INTERVAL_HOURS = int(os.environ.get("HEALTH_CHECK_HOURS", "6"))
+ENVIRONMENT    = os.environ.get("ENVIRONMENT", "development")
+
+# Bootstrap admins by email (CSV). Matched users get is_admin=TRUE on every
+# Google login. Revocation must be done in DB (UPDATE users SET is_admin=FALSE);
+# removing an email from this var alone does NOT demote — by design.
+ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ADMIN_EMAILS", "").split(",")
+    if e.strip()
+}
+
+COOKIE_NAME    = "kb_session"
+COOKIE_SECURE  = ENVIRONMENT == "production"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kb-platform")
@@ -68,16 +86,37 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
-async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> dict:
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+def set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=TOKEN_EXPIRE * 60,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
 
-    payload = decode_token(auth_header.split(" ", 1)[1])
+
+def clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(key=COOKIE_NAME, path="/")
+
+
+async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> dict:
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    payload = decode_token(token)
     user_id = payload.get("sub")
 
     result = await db.execute(
-        text("SELECT id, email, display_name, karma_score FROM users WHERE id = :id AND is_active = TRUE"),
+        text("SELECT id, email, display_name, karma_score, is_admin FROM users WHERE id = :id AND is_active = TRUE"),
         {"id": user_id},
     )
     user = result.mappings().first()
@@ -142,12 +181,9 @@ async def run_link_health_check() -> None:
 
             for row, link_status in zip(rows, statuses):
                 new_status = link_status if isinstance(link_status, str) else "broken"
+                extra = ", last_health_check = NOW()" if table == "knowledge_base" else ""
                 await db.execute(
-                    text(
-                        f"UPDATE {table} "  # noqa: S608
-                        f"SET status = :s, last_health_check = NOW() "
-                        f"WHERE id = :id"
-                    ),
+                    text(f"UPDATE {table} SET status = :s{extra} WHERE id = :id"),  # noqa: S608
                     {"s": new_status, "id": str(row.id)},
                 )
 
@@ -186,7 +222,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY,
+    same_site="lax",
+    https_only=COOKIE_SECURE,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONTEND_URL],
@@ -195,10 +236,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Admin router. Imported here (not at the top) because admin.py does
+# `from main import ...` — by this point engine, AsyncSessionLocal,
+# get_db, get_current_user and run_link_health_check are all bound.
+import admin  # noqa: E402
+
+app.include_router(admin.router)
+
 
 # ─────────────────────────────────────────────
 #  Pydantic Schemas  (Pydantic v2, lenient URL handling)
 # ─────────────────────────────────────────────
+class ManufacturerOut(BaseModel):
+    id: UUID4
+    slug: str
+    display_name: str
+    website_url: str
+    logo_url: Optional[str] = None
+
+
+class CertificationOut(BaseModel):
+    id: UUID4
+    code: str
+    display_name: str
+    vendor_slug: Optional[str] = None
+    icon: Optional[str] = None
+    website_url: Optional[str] = None
+
+
 class KBArticleOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -220,15 +285,25 @@ class VoteIn(BaseModel):
     vote: Literal["like", "dislike"]
 
 
+class VoteOut(BaseModel):
+    kb_id: UUID4
+    vote: Optional[Literal["like", "dislike"]] = None   # None when the vote was removed
+    resolution_score: Optional[float] = None
+    total_votes: int = 0
+
+
 class AcademyResourceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID4
-    certification: str
+    certification_code: str
+    certification_name: str
+    certification_icon: Optional[str] = None
+    vendor_slug: Optional[str] = None
     level: str
     title: str
     description: str
-    resource_url: str
+    resource_url: HttpUrl
     status: str
     tags: list[str]
     is_free: bool
@@ -239,6 +314,7 @@ class UserOut(BaseModel):
     email: str
     display_name: str
     karma_score: int
+    is_admin: bool = False
 
 
 # ─────────────────────────────────────────────
@@ -247,6 +323,44 @@ class UserOut(BaseModel):
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+# ─────────────────────────────────────────────
+#  Routes · Catalog endpoints (dynamic dropdowns)
+# ─────────────────────────────────────────────
+@app.get("/api/manufacturers", response_model=list[ManufacturerOut])
+async def list_manufacturers(db: AsyncSession = Depends(get_db)):
+    """Vendor catalog. Consumed by KB filters and the create-article form."""
+    result = await db.execute(
+        text("""
+            SELECT id, slug, display_name, website_url, logo_url
+            FROM manufacturers
+            ORDER BY display_name
+        """)
+    )
+    return [dict(r) for r in result.mappings().all()]
+
+
+@app.get("/api/certifications", response_model=list[CertificationOut])
+async def list_certifications(
+    vendor: Optional[str] = Query(default=None, description="Filter by vendor slug"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Certification catalog. Replaces the cert_name enum.
+    Requires migration 006 to be applied — returns 500 otherwise.
+    """
+    result = await db.execute(
+        text("""
+            SELECT id, code, display_name, vendor_slug, icon, website_url
+            FROM certifications
+            WHERE is_active = TRUE
+              AND (CAST(:vendor AS TEXT) IS NULL OR vendor_slug = :vendor)
+            ORDER BY display_order, code
+        """),
+        {"vendor": vendor},
+    )
+    return [dict(r) for r in result.mappings().all()]
 
 
 # ─────────────────────────────────────────────
@@ -289,11 +403,38 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
     await db.commit()
     user = result.mappings().first()
 
+    # Bootstrap admin promotion (idempotent). DB-only revocation, see ADMIN_EMAILS.
+    if email.lower() in ADMIN_EMAILS:
+        await db.execute(
+            text("UPDATE users SET is_admin = TRUE WHERE google_sub = :sub"),
+            {"sub": google_sub},
+        )
+        await db.commit()
+        # Re-fetch so any downstream consumer of `user` sees the post-promotion state.
+        # The JWT itself only carries sub+email, but get_current_user reads is_admin
+        # fresh from DB on every request, so the next /api/auth/me reflects this.
+        result = await db.execute(
+            text(
+                "SELECT id, email, display_name, karma_score, is_admin "
+                "FROM users WHERE google_sub = :sub"
+            ),
+            {"sub": google_sub},
+        )
+        user = result.mappings().first()
+
     access_token = create_access_token({"sub": str(user["id"]), "email": user["email"]})
-    return RedirectResponse(
-        url=f"{FRONTEND_URL}/auth/callback?token={access_token}",
-        status_code=302,
-    )
+
+    response = RedirectResponse(url=f"{FRONTEND_URL}/", status_code=302)
+    set_auth_cookie(response, access_token)
+    return response
+
+
+@app.post("/api/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout():
+    """Clears the kb_session cookie. Idempotent — no auth required."""
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    clear_auth_cookie(response)
+    return response
 
 
 @app.get("/api/auth/me", response_model=UserOut)
@@ -334,24 +475,24 @@ async def search_kb(
             rs.resolution_score,
             rs.total_votes,
             CASE
-                WHEN :q = '' THEN 1.0
+                WHEN CAST(:q AS TEXT) = '' THEN 1.0
                 ELSE GREATEST(
-                    similarity(kb.title,       :q),
-                    similarity(kb.description, :q)
+                    similarity(kb.title,       CAST(:q AS TEXT)),
+                    similarity(kb.description, CAST(:q AS TEXT))
                 )
             END AS sim_score
         FROM knowledge_base kb
         JOIN manufacturers m   ON m.id = kb.manufacturer_id
         LEFT JOIN kb_resolution_scores rs ON rs.kb_id = kb.id
         WHERE
-            (:q = '' OR
-                similarity(kb.title, :q) > 0.15 OR
-                similarity(kb.description, :q) > 0.10 OR
-                kb.fts_vector @@ plainto_tsquery('english', :q)
+            (CAST(:q AS TEXT) = '' OR
+                similarity(kb.title, CAST(:q AS TEXT)) > 0.15 OR
+                similarity(kb.description, CAST(:q AS TEXT)) > 0.10 OR
+                kb.fts_vector @@ plainto_tsquery('english', CAST(:q AS TEXT))
             )
-            AND (:manufacturer IS NULL OR m.slug = :manufacturer)
-            AND (:status_f IS NULL OR kb.status::TEXT = :status_f)
-            AND (:tags_empty OR kb.tags @> :tag_arr::TEXT[])
+            AND (CAST(:manufacturer AS TEXT) IS NULL OR m.slug = :manufacturer)
+            AND (CAST(:status_f AS TEXT) IS NULL OR kb.status::TEXT = :status_f)
+            AND (CAST(:tags_empty AS BOOLEAN) OR kb.tags @> CAST(:tag_arr AS TEXT[]))
         ORDER BY sim_score DESC, kb.created_at DESC
         LIMIT :limit OFFSET :offset
     """
@@ -411,7 +552,22 @@ async def get_kb_article(kb_id: UUID4, db: AsyncSession = Depends(get_db)):
 # ─────────────────────────────────────────────
 #  Routes · Voting (protected)
 # ─────────────────────────────────────────────
-@app.post("/api/kb/vote", status_code=status.HTTP_201_CREATED)
+async def _resolution_for(db: AsyncSession, kb_id: str) -> tuple[Optional[float], int]:
+    """Reads the current resolution_score / total_votes for a KB article."""
+    result = await db.execute(
+        text(
+            "SELECT resolution_score, total_votes "
+            "FROM kb_resolution_scores WHERE kb_id = :id"
+        ),
+        {"id": kb_id},
+    )
+    row = result.mappings().first()
+    if not row:
+        return (None, 0)
+    return (row["resolution_score"], row["total_votes"])
+
+
+@app.post("/api/kb/vote", response_model=VoteOut, status_code=status.HTTP_201_CREATED)
 async def cast_vote(
     payload: VoteIn,
     current_user: dict = Depends(get_current_user),
@@ -422,24 +578,49 @@ async def cast_vote(
         text("""
             INSERT INTO interactions (kb_id, user_id, vote)
             VALUES (:kb_id, :user_id, :vote)
-            ON CONFLICT (user_id, kb_id) DO UPDATE SET vote = EXCLUDED.vote
+            ON CONFLICT (user_id, kb_id) DO UPDATE
+                SET vote = EXCLUDED.vote
         """),
-        {"kb_id": str(payload.kb_id), "user_id": current_user["id"], "vote": payload.vote},
+        {
+            "kb_id":   str(payload.kb_id),
+            "user_id": str(current_user["id"]),
+            "vote":    payload.vote,
+        },
     )
     await db.commit()
 
-    # Return updated resolution score
-    result = await db.execute(
-        text("SELECT resolution_score, total_votes FROM kb_resolution_scores WHERE kb_id = :id"),
-        {"id": str(payload.kb_id)},
+    score, total = await _resolution_for(db, str(payload.kb_id))
+    return VoteOut(
+        kb_id=payload.kb_id,
+        vote=payload.vote,
+        resolution_score=score,
+        total_votes=total,
     )
-    row = result.mappings().first()
-    return {
-        "kb_id": str(payload.kb_id),
-        "vote": payload.vote,
-        "resolution_score": row["resolution_score"] if row else None,
-        "total_votes": row["total_votes"] if row else 0,
-    }
+
+
+@app.delete("/api/kb/vote/{kb_id}", response_model=VoteOut)
+async def remove_vote(
+    kb_id: UUID4,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retira el voto del usuario (undo). El trigger de karma (migración 005)
+    reversa la contribución al karma_score automáticamente.
+    """
+    await db.execute(
+        text("DELETE FROM interactions WHERE kb_id = :kb AND user_id = :u"),
+        {"kb": str(kb_id), "u": str(current_user["id"])},
+    )
+    await db.commit()
+
+    score, total = await _resolution_for(db, str(kb_id))
+    return VoteOut(
+        kb_id=kb_id,
+        vote=None,
+        resolution_score=score,
+        total_votes=total,
+    )
 
 
 # ─────────────────────────────────────────────
@@ -447,54 +628,52 @@ async def cast_vote(
 # ─────────────────────────────────────────────
 @app.get("/api/academy", response_model=list[AcademyResourceOut])
 async def list_academy(
-    certification: Optional[str] = Query(default=None),
+    certification: Optional[str] = Query(
+        default=None, description="Certification code (e.g. CCNA, PCNSA)"
+    ),
     level: Optional[str] = Query(default=None),
     is_free: Optional[bool] = Query(default=None),
     q: str = Query(default=""),
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ):
+    """
+    Academy resource catalog joined with certifications.
+    Requires migration 006 to be applied — returns 500 otherwise
+    (column academy_resources.certification_id does not exist).
+    """
     sql = """
-        SELECT
-            id,
-            certification::TEXT AS certification,
-            level::TEXT         AS level,
-            title,
-            description,
-            resource_url,
-            status::TEXT        AS status,
-            tags,
-            is_free
-        FROM academy_resources
+        SELECT ar.id,
+               c.code          AS certification_code,
+               c.display_name  AS certification_name,
+               c.icon          AS certification_icon,
+               c.vendor_slug   AS vendor_slug,
+               ar.level, ar.title, ar.description,
+               ar.resource_url, ar.status, ar.tags, ar.is_free
+        FROM   academy_resources ar
+        JOIN   certifications    c ON c.id = ar.certification_id
         WHERE
-            (:q = '' OR similarity(title, :q) > 0.15)
-            AND (:cert IS NULL OR certification::TEXT = :cert)
-            AND (:level IS NULL OR level::TEXT = :level)
-            AND (:free IS NULL OR is_free = :free)
+            (:q = '' OR similarity(ar.title, :q) > 0.15)
+            AND (CAST(:cert AS TEXT) IS NULL OR c.code         = :cert)
+            AND (CAST(:level AS TEXT) IS NULL OR ar.level::TEXT = :level)
+            AND (CAST(:free AS BOOLEAN) IS NULL OR ar.is_free     = :free)
+            AND c.is_active = TRUE
         ORDER BY
-            CASE level::TEXT
+            c.display_order,
+            CASE ar.level
                 WHEN 'beginner'     THEN 1
                 WHEN 'associate'    THEN 2
                 WHEN 'professional' THEN 3
                 WHEN 'expert'       THEN 4
             END,
-            certification::TEXT
+            ar.title
         LIMIT :limit
     """
     result = await db.execute(
         text(sql),
-        {"q": q, "cert": certification, "level": level, "free": is_free, "limit": limit},
+        {"q": q, "cert": certification, "level": level,
+         "free": is_free, "limit": limit},
     )
     return [dict(r) for r in result.mappings().all()]
 
 
-# ─────────────────────────────────────────────
-#  Routes · Admin: Manual Link Health Check
-# ─────────────────────────────────────────────
-@app.post("/api/admin/health-check")
-async def manual_health_check(
-    current_user: dict = Depends(get_current_user),
-):
-    """Trigger a manual link health check (admin only, extend with role check)."""
-    asyncio.create_task(run_link_health_check())
-    return {"message": "Health check started in background"}

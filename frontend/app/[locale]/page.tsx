@@ -1,11 +1,11 @@
 import { unstable_setRequestLocale } from "next-intl/server";
-import AcademyClient from "./AcademyClient";
+import KBSearch from "@/components/KBSearch";
 
-export default function AcademyPage({
+export default function HomePage({
   params,
 }: {
   params: { locale: string };
 }) {
   unstable_setRequestLocale(params.locale);
-  return <AcademyClient />;
+  return <KBSearch />;
 }
