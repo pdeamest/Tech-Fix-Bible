@@ -1,11 +1,12 @@
 # .github/workflows/db-backup.yml
-# Daily Postgres 18 backup → uploaded as a GitHub Release artifact.
+# Daily Postgres 18 backup using the official postgres:18 Docker image.
+# Server is Postgres 18.3, client must be >= server version.
 
 name: db-backup
 
 on:
   schedule:
-    - cron: '0 3 * * *'   # 03:00 UTC every day
+    - cron: '0 3 * * *'   # 03:00 UTC daily
   workflow_dispatch:
 
 permissions:
@@ -17,41 +18,17 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Install Postgres 18 client (PGDG repo)
+      - name: Set timestamp
+        id: ts
         run: |
-          set -euo pipefail
-          
-          # Modern signed-by method (apt-key is deprecated in Ubuntu 24)
-          sudo install -d /etc/apt/keyrings
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo tee /etc/apt/keyrings/pgdg.asc > /dev/null
-          
-          CODENAME=$(lsb_release -cs)
-          echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          
-          sudo apt-get update
-          
-          # Remove the preinstalled pg16 client to avoid version conflicts
-          sudo apt-get remove -y postgresql-client-16 postgresql-client-common || true
-          
-          # Install pg18 client + verify
-          sudo apt-get install -y postgresql-client-18
-          
-          INSTALLED_VERSION=$(pg_dump --version | grep -oE '[0-9]+\.[0-9]+' | head -1)
-          echo "→ pg_dump version installed: $INSTALLED_VERSION"
-          
-          if [[ ! "$INSTALLED_VERSION" =~ ^18\. ]]; then
-            echo "❌ Expected pg_dump 18.x but got $INSTALLED_VERSION"
-            echo "   Server is Postgres 18.3, client must be >= server version."
-            exit 1
-          fi
-          
-          echo "✓ pg_dump 18.x ready"
+          TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "dumpfile=techkb-${TIMESTAMP}.dump" >> $GITHUB_OUTPUT
 
-      - name: Generate dump
+      - name: Generate dump using postgres:18 container
         env:
           DATABASE_PUBLIC_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+          DUMPFILE: ${{ steps.ts.outputs.dumpfile }}
         run: |
           set -euo pipefail
           
@@ -60,31 +37,33 @@ jobs:
             exit 1
           fi
           
-          TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
-          DUMPFILE="techkb-${TIMESTAMP}.dump"
-          echo "DUMPFILE=$DUMPFILE" >> $GITHUB_ENV
-          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          echo "→ Pulling postgres:18 image..."
+          docker pull postgres:18 > /dev/null
           
-          echo "→ Connecting to Postgres and generating dump..."
-          pg_dump "$DATABASE_PUBLIC_URL" \
-            --format=custom \
-            --no-owner \
-            --no-privileges \
-            --file="$DUMPFILE"
+          echo "→ Generating dump via pg_dump 18 inside container..."
+          docker run --rm \
+            -v "${PWD}:/backup" \
+            -e PGURL="$DATABASE_PUBLIC_URL" \
+            postgres:18 \
+            pg_dump "$PGURL" \
+              --format=custom \
+              --no-owner \
+              --no-privileges \
+              --file="/backup/${DUMPFILE}"
           
           echo "✓ Dump generated:"
-          ls -lh "$DUMPFILE"
+          ls -lh "${DUMPFILE}"
 
       - name: Upload as GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: backup-${{ env.TIMESTAMP }}
-          name: "DB Backup ${{ env.TIMESTAMP }}"
+          tag_name: backup-${{ steps.ts.outputs.timestamp }}
+          name: "DB Backup ${{ steps.ts.outputs.timestamp }}"
           body: |
             Automated daily Postgres 18 backup from Railway.
             
             **Restore:**
 pg_restore --no-owner --no-privileges -d $TARGET_DB techkb-*.dump
-files: ${{ env.DUMPFILE }}
+files: ${{ steps.ts.outputs.dumpfile }}
           make_latest: false
           prerelease: true
