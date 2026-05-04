@@ -1,0 +1,56 @@
+# .github/workflows/db-backup.yml
+# Daily Postgres backup → uploaded as a GitHub Release artifact.
+# Schedule: 03:00 UTC daily (00:00 Chile in standard time, 23:00 in DST).
+# Manual: workflow_dispatch trigger from Actions tab.
+
+name: db-backup
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC every day
+  workflow_dispatch:       # allow manual trigger
+
+permissions:
+  contents: write          # required to create Releases
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Install Postgres 18 client
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-18
+
+      - name: Generate dump
+        env:
+          DATABASE_PUBLIC_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+        run: |
+          TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+          DUMPFILE="techkb-${TIMESTAMP}.dump"
+          echo "DUMPFILE=$DUMPFILE" >> $GITHUB_ENV
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+
+          pg_dump "$DATABASE_PUBLIC_URL" \
+            --format=custom \
+            --no-owner \
+            --no-privileges \
+            --file="$DUMPFILE"
+
+          ls -lh "$DUMPFILE"
+
+      - name: Upload as GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: backup-${{ env.TIMESTAMP }}
+          name: "DB Backup ${{ env.TIMESTAMP }}"
+          body: |
+            Automated daily Postgres backup from Railway.
+            Restore with: `pg_restore --no-owner --no-privileges -d $TARGET_DB techkb-*.dump`
+          files: ${{ env.DUMPFILE }}
+          make_latest: false
+          prerelease: true
