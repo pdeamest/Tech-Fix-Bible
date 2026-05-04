@@ -10,6 +10,20 @@
 > engineers. Indexes vendor error codes and integration scenarios across
 > **12 vendors · 48 curated articles · 143 mapped error codes**.
 
+
+## 🚀 Live Deployment
+
+| Component | URL | Status |
+|-----------|-----|--------|
+| Frontend (Next.js) | https://tech-fix-bible.vercel.app | 🟢 Live |
+| Backend API (FastAPI) | https://tech-fix-bible-production.up.railway.app | 🟢 Live |
+| API Docs (Swagger) | https://tech-fix-bible-production.up.railway.app/api/docs | 🟢 Live |
+| Database | Railway Postgres 18.3 | 🟢 Live |
+| Backups | GitHub Releases (daily 03:00 UTC) | 🟢 Automated |
+
+**Stage 1 (MVP) shipped.** See `scripts/` for ops tooling: `apply_migrations.sh`, `seed_kb_articles.sql`, `backup_db.sh`, `restore_db.sh`.
+
+---
 ---
 
 ## Why this exists
